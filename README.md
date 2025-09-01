@@ -48,7 +48,6 @@ CNY→USD: 0.140200
 SGE → USD/oz: 3,464.88 USD/oz
 CME Gold Futures: 3,475.70 USD/oz
 Result: -10.82 USD/oz
-نتیجه: -10.82 USD/oz
 ```
 
 ---
