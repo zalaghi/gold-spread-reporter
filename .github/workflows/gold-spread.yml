@@ -1,48 +1,38 @@
-on:
-schedule:
-#workflow_dispatch:
-# Weekdays at 09:00 Europe/Madrid (CEST = UTC+2). 09:00 CEST == 07:00 UTC.
-- cron: '0 7 * * 1-5'
-workflow_dispatch:
+name: "Gold Spread to Telegram"
 
+on:
+  schedule:
+    # Weekdays at 09:00 Europe/Madrid (CEST = UTC+2). 09:00 CEST == 07:00 UTC.
+    - cron: "0 7 * * 1-5"
+  workflow_dispatch:
 
 jobs:
-run:
-runs-on: ubuntu-latest
-steps:
-- name: Check out repository
-uses: actions/checkout@v4
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-name: "Gold Spread to Telegram"
-uses: actions/setup-python@v5
-with:
-python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-
-- name: Install dependencies
-run: |
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-
-- name: Run Gold Spread Reporter
-env:
-TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-# SGE source options: XWTEAM (default) or JISU
-SGE_SOURCE: ${{ vars.SGE_SOURCE }}
-# If you choose JISU, provide the key via secret below
-JISUAPI_KEY: ${{ secrets.JISUAPI_KEY }}
-# Choose which SGE field to use: SP | BP | MID (avg of SP & BP)
-SGE_PRICE_MODE: ${{ vars.SGE_PRICE_MODE }}
-# FX source options: TRADINGVIEW (default), EXCHANGERATE_HOST, or YAHOO
-FX_SOURCE: ${{ vars.FX_SOURCE }}
-# Optional: override TradingView ticker (default: FX_IDC:USDCNY)
-TV_FX_TICKER: ${{ vars.TV_FX_TICKER }}
-# Optional: override Yahoo symbol for futures (default: GC=F)
-YF_FUT_SYMBOL: ${{ vars.YF_FUT_SYMBOL }}
-# Optional: specify parse mode for Telegram: 'HTML' or 'Markdown'
-TELEGRAM_PARSE_MODE: ${{ vars.TELEGRAM_PARSE_MODE }}
-run: |
-python src/report.py
+      - name: Run Gold Spread Reporter
+        env:
+          SGE_SOURCE: ${{ vars.SGE_SOURCE }}
+          JISUAPI_KEY: ${{ secrets.JISUAPI_KEY }}
+          SGE_PRICE_MODE: ${{ vars.SGE_PRICE_MODE }}
+          FX_SOURCE: ${{ vars.FX_SOURCE }}
+          TV_FX_TICKER: ${{ vars.TV_FX_TICKER }}
+          YF_FUT_SYMBOL: ${{ vars.YF_FUT_SYMBOL }}
+          TELEGRAM_PARSE_MODE: ${{ vars.TELEGRAM_PARSE_MODE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python src/report.py
