@@ -250,11 +250,11 @@ def build_summary(
     now_utc: Optional[dt.datetime] = None,
     parse_mode: str = "TEXT",
 ) -> str:
-    # Using CNY→USD directly for clarity
+    # Step 3: SGE converted to USD/oz
     usd_per_oz_from_sge = (sge_cny_per_g * GRAMS_PER_TROY_OUNCE) * cny_to_usd
-    diff = cme_usd_per_oz - usd_per_oz_from_sge
 
-    # Explicit sign formatting
+    # Difference = (3 − 4)
+    diff = usd_per_oz_from_sge - cme_usd_per_oz
     if diff > 0:
         diff_str = f"+{abs(diff):,.2f}"
     elif diff < 0:
@@ -274,7 +274,7 @@ def build_summary(
 <b>2) CNY→USD:</b> {cny_to_usd:,.6f}
 <b>3) SGE → USD/oz:</b> {usd_per_oz_from_sge:,.2f} USD/oz
 <b>4) CME Gold Futures:</b> {cme_usd_per_oz:,.2f} USD/oz
-<b>Δ (4 − 3):</b> {diff_str} USD/oz
+<b>Result:</b> {diff_str} USD/oz
 """.strip()
     else:
         return "\n".join([
@@ -285,7 +285,7 @@ def build_summary(
             f"2) CNY→USD: {cny_to_usd:,.6f}",
             f"3) SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz",
             f"4) CME Gold Futures: {cme_usd_per_oz:,.2f} USD/oz",
-            f"Δ (4 − 3): {diff_str} USD/oz",
+            f"Result: {diff_str} USD/oz",
         ])
 
 def main() -> None:
