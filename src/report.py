@@ -1,6 +1,7 @@
 import os
 import math
 import json
+import time
 import datetime as dt
 from typing import Dict, Any, Optional
 
@@ -8,23 +9,57 @@ import requests
 
 GRAMS_PER_TROY_OUNCE = 31.1034768
 
-# -------- Utilities --------
+# A simple browsery UA helps with some public endpoints
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+    )
+}
+
+# -------- HTTP helpers with retries --------
+
+def _request_with_retries(
+    method: str,
+    url: str,
+    *,
+    max_retries: int = 5,
+    backoff_base: float = 0.6,
+    expected_json: bool = True,
+    **kwargs
+):
+    """HTTP request with basic exponential backoff on 429/5xx."""
+    headers = kwargs.pop("headers", {}) or {}
+    headers = {**DEFAULT_HEADERS, **headers}
+    for attempt in range(max_retries):
+        resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
+        if resp.status_code < 400:
+            if expected_json:
+                try:
+                    return resp.json()
+                except Exception as e:
+                    raise RuntimeError(f"Non-JSON response from {url}: {resp.text[:200]}") from e
+            return resp.text
+
+        # Retry on throttling or server errors
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+            # honor Retry-After if present
+            ra = resp.headers.get("Retry-After")
+            if ra and ra.isdigit():
+                delay = float(ra)
+            else:
+                delay = backoff_base * (2 ** attempt)  # 0.6, 1.2, 2.4, ...
+            time.sleep(delay)
+            continue
+
+        # Unrecoverable (or out of retries)
+        resp.raise_for_status()
 
 def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    r = requests.get(url, params=params, headers=headers, timeout=20)
-    r.raise_for_status()
-    try:
-        return r.json()
-    except Exception as e:
-        raise RuntimeError(f"Non-JSON response from {url}: {r.text[:200]}") from e
+    return _request_with_retries("GET", url, params=params, headers=headers, expected_json=True)
 
 def http_post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    r = requests.post(url, json=payload, headers=headers, timeout=20)
-    r.raise_for_status()
-    try:
-        return r.json()
-    except Exception as e:
-        raise RuntimeError(f"Non-JSON response from {url}: {r.text[:200]}") from e
+    return _request_with_retries("POST", url, json=payload, headers=headers, expected_json=True)
 
 def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optional[str] = None) -> None:
     api = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -32,7 +67,7 @@ def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optio
     if parse_mode:
         payload["parse_mode"] = parse_mode
         payload["disable_web_page_preview"] = True
-    r = requests.post(api, json=payload, timeout=20)
+    r = requests.post(api, json=payload, headers=DEFAULT_HEADERS, timeout=20)
     if not r.ok:
         raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")
 
@@ -42,7 +77,7 @@ def fetch_sge_au9999_from_xwteam(mode: str = "SP") -> float:
     """
     Fetch SGE Au9999 price (CNY/gram) from a free aggregator:
     https://free.xwteam.cn/api/gold/trade
-    Returns fields under data.SH where Symbol == 'SH_Au9999'.
+    Uses data.SH where Symbol == 'SH_Au9999'.
     mode: 'SP' (sell), 'BP' (buy), or 'MID' = (SP+BP)/2.
     """
     url = "https://free.xwteam.cn/api/gold/trade"
@@ -57,17 +92,14 @@ def fetch_sge_au9999_from_xwteam(mode: str = "SP") -> float:
     if not row:
         raise RuntimeError(f"Could not find SH_Au9999 in response: {str(data)[:300]}")
 
-    bp = row.get("BP")
-    sp = row.get("SP")
-
     def _to_float(x):
         try:
             return float(x)
         except Exception:
             return float('nan')
 
-    bp = _to_float(bp)
-    sp = _to_float(sp)
+    bp = _to_float(row.get("BP"))
+    sp = _to_float(row.get("SP"))
 
     mode = (mode or "SP").upper()
     if mode == "MID" and not math.isnan(bp) and not math.isnan(sp):
@@ -116,10 +148,7 @@ def fetch_usd_cny_from_tradingview(ticker: str = "FX_IDC:USDCNY") -> float:
     """
     url = "https://scanner.tradingview.com/forex/scan"
     columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
-    payload = {
-        "symbols": {"tickers": [ticker], "query": {"types": []}},
-        "columns": columns,
-    }
+    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
     data = http_post_json(url, payload)
     items = data.get("data") or []
     if not items:
@@ -156,17 +185,50 @@ def fetch_usd_cny_rate(source: str = "TRADINGVIEW") -> float:
             raise RuntimeError(f"exchangerate.host missing CNY in {json.dumps(data)[:200]}")
         return float(rate)
 
+def _fetch_yahoo_quote_with_retry(symbol: str) -> Optional[float]:
+    """Try Yahoo quote with retries. Return None on failure."""
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    try:
+        data = http_get_json(url, params={"symbols": symbol})
+        result = (data.get("quoteResponse", {}).get("result") or [{}])[0]
+        price = result.get("regularMarketPrice") or result.get("bid") or result.get("ask")
+        return float(price) if price is not None else None
+    except Exception:
+        return None
+
+def _fetch_tradingview_futures_close(ticker: str = "COMEX:GC1!") -> float:
+    """
+    Fallback: TradingView futures screener for front/continuous gold.
+    Common tickers: COMEX:GC1!  or  CME:GC1!
+    """
+    url = "https://scanner.tradingview.com/futures/scan"
+    columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
+    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
+    data = http_post_json(url, payload)
+    items = data.get("data") or []
+    if not items:
+        raise RuntimeError(f"TradingView futures scan returned no data for {ticker}: {data}")
+    values = items[0].get("d") or []
+    mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
+    close = mapping.get("close")
+    if close is None:
+        raise RuntimeError(f"TradingView futures close missing in response: {mapping}")
+    return float(close)
+
 def fetch_cme_gold_futures_usd_per_oz(yf_symbol: str = "GC=F") -> float:
     """
-    Use Yahoo Finance quote endpoint to get COMEX/CME Gold futures (nearest contract / continuous).
+    Get COMEX/CME Gold futures (USD/oz).
+    1) Try Yahoo Finance (GC=F) with retries (and browser UA)
+    2) If throttled/unavailable, fall back to TradingView futures (COMEX:GC1!)
     """
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    data = http_get_json(url, params={"symbols": yf_symbol})
-    result = (data.get("quoteResponse", {}).get("result") or [{}])[0]
-    price = result.get("regularMarketPrice") or result.get("bid") or result.get("ask")
-    if not price:
-        raise RuntimeError(f"Yahoo {yf_symbol} missing price in {json.dumps(result)[:200]}")
-    return float(price)
+    # First try Yahoo (returns None if throttled/failed)
+    price = _fetch_yahoo_quote_with_retry(yf_symbol)
+    if price is not None:
+        return float(price)
+
+    # Fallback to TradingView futures
+    tv_ticker = os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!"
+    return _fetch_tradingview_futures_close(tv_ticker)
 
 # -------- Business Logic --------
 
@@ -181,7 +243,13 @@ def resolve_sge_price() -> float:
     else:
         return fetch_sge_au9999_from_xwteam(mode)
 
-def build_summary(sge_cny_per_g: float, usd_to_cny: float, cme_usd_per_oz: float, now_utc: Optional[dt.datetime] = None, parse_mode: str = "TEXT") -> str:
+def build_summary(
+    sge_cny_per_g: float,
+    usd_to_cny: float,
+    cme_usd_per_oz: float,
+    now_utc: Optional[dt.datetime] = None,
+    parse_mode: str = "TEXT",
+) -> str:
     usd_per_oz_from_sge = (sge_cny_per_g * GRAMS_PER_TROY_OUNCE) / usd_to_cny
     diff = cme_usd_per_oz - usd_per_oz_from_sge
     now_utc = now_utc or dt.datetime.utcnow()
@@ -225,7 +293,10 @@ def main() -> None:
     cme_usd_per_oz = fetch_cme_gold_futures_usd_per_oz(yf_symbol)
 
     msg = build_summary(sge_cny_per_g, usd_to_cny, cme_usd_per_oz, parse_mode=parse_mode)
-    send_telegram_message(token, chat_id, msg, parse_mode=(parse_mode if parse_mode in {"HTML", "MARKDOWN"} else None))
+    send_telegram_message(
+        token, chat_id, msg,
+        parse_mode=(parse_mode if parse_mode in {"HTML", "MARKDOWN"} else None)
+    )
 
 if __name__ == "__main__":
     main()
