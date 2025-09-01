@@ -40,13 +40,14 @@
 ## نمونه خروجی
 
 ```
-گزارش اختلاف طلا (SGE vs CME)
-زمان: 2025-09-01 07:00 UTC
+Gold Spread (SGE vs CME)
+Time: 2025-09-01 07:00 UTC
 
 SGE (Au9999): 794.36 CNY/g
 CNY→USD: 0.140200
 SGE → USD/oz: 3,464.88 USD/oz
 CME Gold Futures: 3,475.70 USD/oz
+Result: -10.82 USD/oz
 نتیجه: -10.82 USD/oz
 ```
 
