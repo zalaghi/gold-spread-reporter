@@ -1,6 +1,6 @@
 on:
-#schedule:
-workflow_dispatch:
+schedule:
+#workflow_dispatch:
 # Weekdays at 09:00 Europe/Madrid (CEST = UTC+2). 09:00 CEST == 07:00 UTC.
 - cron: '0 7 * * 1-5'
 workflow_dispatch:
