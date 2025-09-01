@@ -270,10 +270,10 @@ def build_summary(
 <b>Gold Spread (SGE vs CME)</b>
 <b>Time:</b> {ts}
 
-<b>1) SGE (Au9999):</b> {sge_cny_per_g:,.2f} CNY/g
-<b>2) CNY→USD:</b> {cny_to_usd:,.6f}
-<b>3) SGE → USD/oz:</b> {usd_per_oz_from_sge:,.2f} USD/oz
-<b>4) CME Gold Futures:</b> {cme_usd_per_oz:,.2f} USD/oz
+<b>SGE (Au9999):</b> {sge_cny_per_g:,.2f} CNY/g
+<b>CNY→USD:</b> {cny_to_usd:,.6f}
+<b>SGE → USD/oz:</b> {usd_per_oz_from_sge:,.2f} USD/oz
+<b>CME Gold Futures:</b> {cme_usd_per_oz:,.2f} USD/oz
 <b>Result:</b> {diff_str} USD/oz
 """.strip()
     else:
@@ -281,10 +281,10 @@ def build_summary(
             "Gold Spread (SGE vs CME)",
             f"Time: {ts}",
             "",
-            f"1) SGE (Au9999): {sge_cny_per_g:,.2f} CNY/g",
-            f"2) CNY→USD: {cny_to_usd:,.6f}",
-            f"3) SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz",
-            f"4) CME Gold Futures: {cme_usd_per_oz:,.2f} USD/oz",
+            f"SGE (Au9999): {sge_cny_per_g:,.2f} CNY/g",
+            f"CNY→USD: {cny_to_usd:,.6f}",
+            f"SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz",
+            f"CME Gold Futures: {cme_usd_per_oz:,.2f} USD/oz",
             f"Result: {diff_str} USD/oz",
         ])
 
