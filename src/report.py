@@ -245,12 +245,13 @@ def resolve_sge_price() -> float:
 
 def build_summary(
     sge_cny_per_g: float,
-    usd_to_cny: float,
+    cny_to_usd: float,
     cme_usd_per_oz: float,
     now_utc: Optional[dt.datetime] = None,
     parse_mode: str = "TEXT",
 ) -> str:
-    usd_per_oz_from_sge = (sge_cny_per_g * GRAMS_PER_TROY_OUNCE) / usd_to_cny
+    # Using CNY→USD directly for clarity
+    usd_per_oz_from_sge = (sge_cny_per_g * GRAMS_PER_TROY_OUNCE) * cny_to_usd
     diff = cme_usd_per_oz - usd_per_oz_from_sge
     now_utc = now_utc or dt.datetime.utcnow()
     ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
@@ -261,7 +262,7 @@ def build_summary(
 <b>Time:</b> {ts}
 
 <b>1) SGE (Au9999):</b> {sge_cny_per_g:,.2f} CNY/g
-<b>2) USD→CNY:</b> {usd_to_cny:,.6f}
+<b>2) CNY→USD:</b> {cny_to_usd:,.6f}
 <b>3) SGE → USD/oz:</b> {usd_per_oz_from_sge:,.2f} USD/oz
 <b>4) CME Gold Futures:</b> {cme_usd_per_oz:,.2f} USD/oz
 <b>Δ (4 − 3):</b> {diff:,.2f} USD/oz
@@ -272,7 +273,7 @@ def build_summary(
             f"Time: {ts}",
             "",
             f"1) SGE (Au9999): {sge_cny_per_g:,.2f} CNY/g",
-            f"2) USD→CNY: {usd_to_cny:,.6f}",
+            f"2) CNY→USD: {cny_to_usd:,.6f}",
             f"3) SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz",
             f"4) CME Gold Futures: {cme_usd_per_oz:,.2f} USD/oz",
             f"Δ (4 − 3): {diff:,.2f} USD/oz",
@@ -288,11 +289,18 @@ def main() -> None:
     if not token or not chat_id:
         raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required.")
 
+    # SGE price (CNY/g)
     sge_cny_per_g = resolve_sge_price()
+
+    # FX: fetch USD→CNY then invert to CNY→USD for display and math
     usd_to_cny = fetch_usd_cny_rate(fx_source)
+    cny_to_usd = 1.0 / float(usd_to_cny)
+
+    # Futures (USD/oz)
     cme_usd_per_oz = fetch_cme_gold_futures_usd_per_oz(yf_symbol)
 
-    msg = build_summary(sge_cny_per_g, usd_to_cny, cme_usd_per_oz, parse_mode=parse_mode)
+    # Build and send
+    msg = build_summary(sge_cny_per_g, cny_to_usd, cme_usd_per_oz, parse_mode=parse_mode)
     send_telegram_message(
         token, chat_id, msg,
         parse_mode=(parse_mode if parse_mode in {"HTML", "MARKDOWN"} else None)
