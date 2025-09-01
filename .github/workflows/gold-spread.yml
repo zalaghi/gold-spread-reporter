@@ -25,13 +25,23 @@ jobs:
 
       - name: Run Gold Spread Reporter
         env:
+          # SGE source options: XWTEAM (default) or JISU
           SGE_SOURCE: ${{ vars.SGE_SOURCE }}
+          # If you choose JISU, provide the key via secret below
           JISUAPI_KEY: ${{ secrets.JISUAPI_KEY }}
+          # Choose which SGE field to use: SP | BP | MID (avg of SP & BP)
           SGE_PRICE_MODE: ${{ vars.SGE_PRICE_MODE }}
+          # FX source options: TRADINGVIEW (default), EXCHANGERATE_HOST, or YAHOO
           FX_SOURCE: ${{ vars.FX_SOURCE }}
+          # Optional: override TradingView FX ticker (default: FX_IDC:USDCNY)
           TV_FX_TICKER: ${{ vars.TV_FX_TICKER }}
+          # Optional: override Yahoo futures symbol (default: GC=F)
           YF_FUT_SYMBOL: ${{ vars.YF_FUT_SYMBOL }}
+          # Optional: override TradingView futures ticker (default: COMEX:GC1!)
+          TV_FUT_TICKER: ${{ vars.TV_FUT_TICKER }}
+          # Optional: specify parse mode for Telegram: 'HTML' or 'Markdown'
           TELEGRAM_PARSE_MODE: ${{ vars.TELEGRAM_PARSE_MODE }}
+          # Required secrets for Telegram
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
