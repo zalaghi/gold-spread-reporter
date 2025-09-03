@@ -31,14 +31,21 @@ jobs:
           JISUAPI_KEY: ${{ secrets.JISUAPI_KEY }}
           # Choose which SGE field to use: SP | BP | MID (avg of SP & BP)
           SGE_PRICE_MODE: ${{ vars.SGE_PRICE_MODE }}
+
           # FX source options: TRADINGVIEW (default), EXCHANGERATE_HOST, or YAHOO
           FX_SOURCE: ${{ vars.FX_SOURCE }}
           # Optional: override TradingView FX ticker (default: FX_IDC:USDCNY)
           TV_FX_TICKER: ${{ vars.TV_FX_TICKER }}
-          # Optional: override Yahoo futures symbol (default: GC=F)
+
+          # --- Reference gold (Step 4) ---
+          # Choose reference source: FUTURES (default) or TV_SPOT
+          REF_SOURCE: ${{ vars.REF_SOURCE }}
+          # When REF_SOURCE=TV_SPOT, set the TradingView spot ticker (default: OANDA:XAUUSD)
+          TV_SPOT_TICKER: ${{ vars.TV_SPOT_TICKER }}
+          # FUTURES options (kept for backward compatibility)
           YF_FUT_SYMBOL: ${{ vars.YF_FUT_SYMBOL }}
-          # Optional: override TradingView futures ticker (default: COMEX:GC1!)
           TV_FUT_TICKER: ${{ vars.TV_FUT_TICKER }}
+
           # Optional: specify parse mode for Telegram: 'HTML' or 'Markdown'
           TELEGRAM_PARSE_MODE: ${{ vars.TELEGRAM_PARSE_MODE }}
           # Required secrets for Telegram
