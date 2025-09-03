@@ -43,12 +43,11 @@ def _request_with_retries(
 
         # Retry on throttling or server errors
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-            # honor Retry-After if present
             ra = resp.headers.get("Retry-After")
             if ra and ra.isdigit():
                 delay = float(ra)
             else:
-                delay = backoff_base * (2 ** attempt)  # 0.6, 1.2, 2.4, ...
+                delay = backoff_base * (2 ** attempt)
             time.sleep(delay)
             continue
 
@@ -71,7 +70,7 @@ def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optio
     if not r.ok:
         raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")
 
-# -------- Data Fetchers --------
+# -------- SGE (Step 1) --------
 
 def fetch_sge_au9999_from_xwteam(mode: str = "SP") -> float:
     """
@@ -141,49 +140,64 @@ def fetch_sge_au9999_from_jisu(appkey: str) -> float:
     price_str = str(preferred.get("price") or preferred.get("new_price") or preferred.get("latest") or "")
     return float(price_str)
 
-def fetch_usd_cny_from_tradingview(ticker: str = "FX_IDC:USDCNY") -> float:
-    """
-    Fetch USD->CNY via TradingView's public screener endpoint.
-    This endpoint is undocumented and may change.
-    """
-    url = "https://scanner.tradingview.com/forex/scan"
-    columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
-    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
-    data = http_post_json(url, payload)
-    items = data.get("data") or []
-    if not items:
-        raise RuntimeError(f"TradingView scan returned no data for {ticker}: {data}")
-    values = items[0].get("d") or []
-    mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
-    close = mapping.get("close")
-    if close is None:
-        raise RuntimeError(f"TradingView close missing in response: {mapping}")
-    return float(close)
-
-def fetch_usd_cny_rate(source: str = "TRADINGVIEW") -> float:
-    """
-    Get USD->CNY. Preferred: TradingView screener (undocumented).
-    Alternatives: exchangerate.host or Yahoo.
-    """
-    s = (source or os.environ.get("FX_SOURCE") or "TRADINGVIEW").upper()
-    if s == "TRADINGVIEW":
-        ticker = os.environ.get("TV_FX_TICKER") or "FX_IDC:USDCNY"
-        return fetch_usd_cny_from_tradingview(ticker)
-    if s == "YAHOO":
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        data = http_get_json(url, params={"symbols": "USDCNY=X"})
-        result = (data.get("quoteResponse", {}).get("result") or [{}])[0]
-        rate = result.get("regularMarketPrice") or result.get("bid") or result.get("ask")
-        if not rate:
-            raise RuntimeError(f"Yahoo USDCNY=X missing price in {json.dumps(result)[:200]}")
-        return float(rate)
+def resolve_sge_price() -> float:
+    src = (os.environ.get("SGE_SOURCE") or "XWTEAM").upper()
+    mode = (os.environ.get("SGE_PRICE_MODE") or "SP").upper()
+    if src == "XWTEAM":
+        return fetch_sge_au9999_from_xwteam(mode)
+    elif src == "JISU":
+        key = os.environ.get("JISUAPI_KEY", "").strip()
+        return fetch_sge_au9999_from_jisu(key)
     else:
-        url = "https://api.exchangerate.host/latest"
-        data = http_get_json(url, params={"base": "USD", "symbols": "CNY"})
-        rate = (data.get("rates") or {}).get("CNY")
-        if not rate:
-            raise RuntimeError(f"exchangerate.host missing CNY in {json.dumps(data)[:200]}")
-        return float(rate)
+        return fetch_sge_au9999_from_xwteam(mode)
+
+# -------- FX (Step 2) — NO TradingView required --------
+
+def fetch_usd_cny_from_exchangerate_host() -> float:
+    """
+    Get USD->CNY using exchangerate.host (free, no key).
+    Returns the number of CNY per 1 USD.
+    """
+    url = "https://api.exchangerate.host/latest"
+    data = http_get_json(url, params={"base": "USD", "symbols": "CNY"})
+    rate = (data.get("rates") or {}).get("CNY")
+    if not rate:
+        raise RuntimeError(f"exchangerate.host missing CNY in {json.dumps(data)[:200]}")
+    return float(rate)
+
+def fetch_usd_cny_from_yahoo() -> float:
+    """
+    Get USD->CNY via Yahoo Finance quote.
+    """
+    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+    data = http_get_json(url, params={"symbols": "USDCNY=X"})
+    result = (data.get("quoteResponse", {}).get("result") or [{}])[0]
+    rate = result.get("regularMarketPrice") or result.get("bid") or result.get("ask")
+    if rate is None:
+        raise RuntimeError(f"Yahoo USDCNY=X missing price in {json.dumps(result)[:200]}")
+    return float(rate)
+
+def fetch_usd_cny_rate(source: str = None) -> float:
+    """
+    Choose FX source. Default to EXCHANGERATE_HOST (no TradingView).
+    """
+    s = (source or os.environ.get("FX_SOURCE") or "EXCHANGERATE_HOST").upper()
+    if s == "EXCHANGERATE_HOST":
+        try:
+            return fetch_usd_cny_from_exchangerate_host()
+        except Exception:
+            # fallback to Yahoo
+            return fetch_usd_cny_from_yahoo()
+    elif s == "YAHOO":
+        try:
+            return fetch_usd_cny_from_yahoo()
+        except Exception:
+            return fetch_usd_cny_from_exchangerate_host()
+    else:
+        # Any unknown value -> safe default
+        return fetch_usd_cny_from_exchangerate_host()
+
+# -------- Reference Gold (Step 4) — Futures or TV Spot --------
 
 def _fetch_yahoo_quote_with_retry(symbol: str) -> Optional[float]:
     """Try Yahoo quote with retries. Return None on failure."""
@@ -196,42 +210,56 @@ def _fetch_yahoo_quote_with_retry(symbol: str) -> Optional[float]:
     except Exception:
         return None
 
-def _fetch_tradingview_futures_close(ticker: str = "COMEX:GC1!") -> float:
+def _tv_scan_close(market: str, ticker: str) -> float:
     """
-    Fallback: TradingView futures screener for front/continuous gold.
-    Common tickers: COMEX:GC1!  or  CME:GC1!
+    Generic TradingView scan: market ∈ {forex, cfd, futures, indices, crypto, stocks...}
+    Returns 'close' or raises with context.
     """
-    url = "https://scanner.tradingview.com/futures/scan"
+    market = market.strip().lower()
+    url = f"https://scanner.tradingview.com/{market}/scan"
     columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
     payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
     data = http_post_json(url, payload)
     items = data.get("data") or []
     if not items:
-        raise RuntimeError(f"TradingView futures scan returned no data for {ticker}: {data}")
+        raise RuntimeError(f"TradingView {market} scan returned no data for {ticker}: {data}")
     values = items[0].get("d") or []
     mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
     close = mapping.get("close")
     if close is None:
-        raise RuntimeError(f"TradingView futures close missing in response: {mapping}")
+        raise RuntimeError(f"TradingView {market} scan: 'close' missing for {ticker}: {mapping}")
     return float(close)
 
-def _fetch_tradingview_spot_close(ticker: str = "OANDA:XAUUSD") -> float:
+def _fetch_tradingview_spot_close(
+    ticker: str = "OANDA:XAUUSD",
+    market: str = None,
+    alt_ticker: str = None,
+    alt_market: str = None
+) -> float:
     """
-    TradingView spot gold via the forex screener (e.g., OANDA:XAUUSD).
+    Preferred: use user-specified market/ticker (defaults to forex/OANDA:XAUUSD).
+    If that returns no data, try alternate (defaults to cfd/TVC:GOLD).
     """
-    url = "https://scanner.tradingview.com/forex/scan"
-    columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
-    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
-    data = http_post_json(url, payload)
-    items = data.get("data") or []
-    if not items:
-        raise RuntimeError(f"TradingView forex scan returned no data for {ticker}: {data}")
-    values = items[0].get("d") or []
-    mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
-    close = mapping.get("close")
-    if close is None:
-        raise RuntimeError(f"TradingView spot close missing in response: {mapping}")
-    return float(close)
+    primary_market = (market or os.environ.get("TV_SPOT_MARKET") or "forex").strip().lower()
+    primary_ticker = (ticker or os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD").strip()
+    fallback_market = (alt_market or os.environ.get("TV_SPOT_MARKET_ALT") or "cfd").strip().lower()
+    fallback_ticker = (alt_ticker or os.environ.get("TV_SPOT_TICKER_ALT") or "TVC:GOLD").strip()
+
+    try:
+        return _tv_scan_close(primary_market, primary_ticker)
+    except Exception as e_primary:
+        try:
+            return _tv_scan_close(fallback_market, fallback_ticker)
+        except Exception as e_fallback:
+            raise RuntimeError(
+                f"Failed to fetch spot via TradingView. "
+                f"Primary {primary_market}:{primary_ticker} → {e_primary}. "
+                f"Fallback {fallback_market}:{fallback_ticker} → {e_fallback}."
+            )
+
+def _fetch_tradingview_futures_close(ticker: str = "COMEX:GC1!") -> float:
+    """TradingView futures screener for front/continuous gold."""
+    return _tv_scan_close("futures", ticker)
 
 def fetch_reference_gold_usd_per_oz(
     yf_symbol: str = "GC=F",
@@ -242,13 +270,17 @@ def fetch_reference_gold_usd_per_oz(
 
     Modes:
       - FUTURES (default): Yahoo GC=F with fallback to TV futures (COMEX:GC1!)
-      - TV_SPOT: TradingView spot price via forex screener (e.g., OANDA:XAUUSD)
+      - TV_SPOT: TradingView spot price via forex/cfd screener (OANDA:XAUUSD → fallback TVC:GOLD)
     """
     src = (ref_source or os.environ.get("REF_SOURCE") or "FUTURES").upper()
 
     if src == "TV_SPOT":
-        tv_spot = os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD"
-        return _fetch_tradingview_spot_close(tv_spot)
+        return _fetch_tradingview_spot_close(
+            ticker=os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD",
+            market=os.environ.get("TV_SPOT_MARKET") or "forex",
+            alt_ticker=os.environ.get("TV_SPOT_TICKER_ALT") or "TVC:GOLD",
+            alt_market=os.environ.get("TV_SPOT_MARKET_ALT") or "cfd",
+        )
 
     # FUTURES (existing behavior)
     price = _fetch_yahoo_quote_with_retry(yf_symbol)
@@ -257,18 +289,7 @@ def fetch_reference_gold_usd_per_oz(
     tv_ticker = os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!"
     return _fetch_tradingview_futures_close(tv_ticker)
 
-# -------- Business Logic --------
-
-def resolve_sge_price() -> float:
-    src = (os.environ.get("SGE_SOURCE") or "XWTEAM").upper()
-    mode = (os.environ.get("SGE_PRICE_MODE") or "SP").upper()
-    if src == "XWTEAM":
-        return fetch_sge_au9999_from_xwteam(mode)
-    elif src == "JISU":
-        key = os.environ.get("JISUAPI_KEY", "").strip()
-        return fetch_sge_au9999_from_jisu(key)
-    else:
-        return fetch_sge_au9999_from_xwteam(mode)
+# -------- Summary / Main --------
 
 def build_summary(
     sge_cny_per_g: float,
@@ -319,7 +340,7 @@ def build_summary(
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    fx_source = (os.environ.get("FX_SOURCE") or "TRADINGVIEW").upper()
+    fx_source = (os.environ.get("FX_SOURCE") or "EXCHANGERATE_HOST").upper()
     yf_symbol = (os.environ.get("YF_FUT_SYMBOL") or "GC=F").strip()
     parse_mode = (os.environ.get("TELEGRAM_PARSE_MODE") or "TEXT").upper()
     ref_source = (os.environ.get("REF_SOURCE") or "FUTURES").upper()
@@ -327,14 +348,14 @@ def main() -> None:
     if not token or not chat_id:
         raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required.")
 
-    # SGE price (CNY/g)
+    # Step 1: SGE price (CNY/g)
     sge_cny_per_g = resolve_sge_price()
 
-    # FX: fetch USD→CNY then invert to CNY→USD for display and math
+    # Step 2: FX — fetch USD→CNY then invert to CNY→USD for display/math
     usd_to_cny = fetch_usd_cny_rate(fx_source)
     cny_to_usd = 1.0 / float(usd_to_cny)
 
-    # Reference gold (USD/oz): Futures (default) or TV spot
+    # Step 4: Reference gold (USD/oz): Futures (default) or TV spot
     ref_usd_per_oz = fetch_reference_gold_usd_per_oz(yf_symbol=yf_symbol, ref_source=ref_source)
     ref_label = "Spot Gold (TradingView)" if ref_source == "TV_SPOT" else "CME Gold Futures"
 
