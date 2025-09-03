@@ -215,18 +215,45 @@ def _fetch_tradingview_futures_close(ticker: str = "COMEX:GC1!") -> float:
         raise RuntimeError(f"TradingView futures close missing in response: {mapping}")
     return float(close)
 
-def fetch_cme_gold_futures_usd_per_oz(yf_symbol: str = "GC=F") -> float:
+def _fetch_tradingview_spot_close(ticker: str = "OANDA:XAUUSD") -> float:
     """
-    Get COMEX/CME Gold futures (USD/oz).
-    1) Try Yahoo Finance (GC=F) with retries (and browser UA)
-    2) If throttled/unavailable, fall back to TradingView futures (COMEX:GC1!)
+    TradingView spot gold via the forex screener (e.g., OANDA:XAUUSD).
     """
-    # First try Yahoo (returns None if throttled/failed)
+    url = "https://scanner.tradingview.com/forex/scan"
+    columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
+    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
+    data = http_post_json(url, payload)
+    items = data.get("data") or []
+    if not items:
+        raise RuntimeError(f"TradingView forex scan returned no data for {ticker}: {data}")
+    values = items[0].get("d") or []
+    mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
+    close = mapping.get("close")
+    if close is None:
+        raise RuntimeError(f"TradingView spot close missing in response: {mapping}")
+    return float(close)
+
+def fetch_reference_gold_usd_per_oz(
+    yf_symbol: str = "GC=F",
+    ref_source: Optional[str] = None
+) -> float:
+    """
+    Get the reference gold price (USD/oz) used in Step 4.
+
+    Modes:
+      - FUTURES (default): Yahoo GC=F with fallback to TV futures (COMEX:GC1!)
+      - TV_SPOT: TradingView spot price via forex screener (e.g., OANDA:XAUUSD)
+    """
+    src = (ref_source or os.environ.get("REF_SOURCE") or "FUTURES").upper()
+
+    if src == "TV_SPOT":
+        tv_spot = os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD"
+        return _fetch_tradingview_spot_close(tv_spot)
+
+    # FUTURES (existing behavior)
     price = _fetch_yahoo_quote_with_retry(yf_symbol)
     if price is not None:
         return float(price)
-
-    # Fallback to TradingView futures
     tv_ticker = os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!"
     return _fetch_tradingview_futures_close(tv_ticker)
 
@@ -246,15 +273,16 @@ def resolve_sge_price() -> float:
 def build_summary(
     sge_cny_per_g: float,
     cny_to_usd: float,
-    cme_usd_per_oz: float,
+    ref_usd_per_oz: float,
     now_utc: Optional[dt.datetime] = None,
     parse_mode: str = "TEXT",
+    ref_label: str = "CME Gold Futures",
 ) -> str:
     # Step 3: SGE converted to USD/oz
     usd_per_oz_from_sge = (sge_cny_per_g * GRAMS_PER_TROY_OUNCE) * cny_to_usd
 
     # Difference = (3 − 4)
-    diff = usd_per_oz_from_sge - cme_usd_per_oz
+    diff = usd_per_oz_from_sge - ref_usd_per_oz
     if diff > 0:
         diff_str = f"+{abs(diff):,.2f}"
     elif diff < 0:
@@ -267,24 +295,24 @@ def build_summary(
 
     if parse_mode.upper() == "HTML":
         return f"""
-<b>Gold Spread (SGE vs CME)</b>
+<b>Gold Spread (SGE vs {ref_label})</b>
 <b>Time:</b> {ts}
 
 <b>SGE (Au9999):</b> {sge_cny_per_g:,.2f} CNY/g
 <b>CNY→USD:</b> {cny_to_usd:,.6f}
 <b>SGE → USD/oz:</b> {usd_per_oz_from_sge:,.2f} USD/oz
-<b>CME Gold Futures:</b> {cme_usd_per_oz:,.2f} USD/oz
+<b>{ref_label}:</b> {ref_usd_per_oz:,.2f} USD/oz
 <b>Result:</b> {diff_str} USD/oz
 """.strip()
     else:
         return "\n".join([
-            "Gold Spread (SGE vs CME)",
+            f"Gold Spread (SGE vs {ref_label})",
             f"Time: {ts}",
             "",
             f"SGE (Au9999): {sge_cny_per_g:,.2f} CNY/g",
             f"CNY→USD: {cny_to_usd:,.6f}",
             f"SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz",
-            f"CME Gold Futures: {cme_usd_per_oz:,.2f} USD/oz",
+            f"{ref_label}: {ref_usd_per_oz:,.2f} USD/oz",
             f"Result: {diff_str} USD/oz",
         ])
 
@@ -294,6 +322,7 @@ def main() -> None:
     fx_source = (os.environ.get("FX_SOURCE") or "TRADINGVIEW").upper()
     yf_symbol = (os.environ.get("YF_FUT_SYMBOL") or "GC=F").strip()
     parse_mode = (os.environ.get("TELEGRAM_PARSE_MODE") or "TEXT").upper()
+    ref_source = (os.environ.get("REF_SOURCE") or "FUTURES").upper()
 
     if not token or not chat_id:
         raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required.")
@@ -305,11 +334,12 @@ def main() -> None:
     usd_to_cny = fetch_usd_cny_rate(fx_source)
     cny_to_usd = 1.0 / float(usd_to_cny)
 
-    # Futures (USD/oz)
-    cme_usd_per_oz = fetch_cme_gold_futures_usd_per_oz(yf_symbol)
+    # Reference gold (USD/oz): Futures (default) or TV spot
+    ref_usd_per_oz = fetch_reference_gold_usd_per_oz(yf_symbol=yf_symbol, ref_source=ref_source)
+    ref_label = "Spot Gold (TradingView)" if ref_source == "TV_SPOT" else "CME Gold Futures"
 
     # Build and send
-    msg = build_summary(sge_cny_per_g, cny_to_usd, cme_usd_per_oz, parse_mode=parse_mode)
+    msg = build_summary(sge_cny_per_g, cny_to_usd, ref_usd_per_oz, parse_mode=parse_mode, ref_label=ref_label)
     send_telegram_message(
         token, chat_id, msg,
         parse_mode=(parse_mode if parse_mode in {"HTML", "MARKDOWN"} else None)
