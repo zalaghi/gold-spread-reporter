@@ -152,39 +152,63 @@ def resolve_sge_price() -> float:
     else:
         return fetch_sge_au9999_from_xwteam(mode)
 
-# -------- Step 2: FX (USD->CNY) via exchangerate.host ONLY --------
+# -------- Step 2: FX (USD->CNY) via exchangerate.host /live (ONLY) --------
 
-def fetch_usd_cny_from_exchangerate_host() -> float:
+def fetch_usd_cny_from_exchangerate_host_live() -> float:
     """
-    Get USD->CNY using exchangerate.host with an access key.
-    We avoid using `base=USD` (may require paid tiers). Instead we request EUR base
-    and compute USD->CNY = (rate[CNY] / rate[USD]).
+    Get USD->CNY using exchangerate.host /live with an access key.
+    Response (apilayer-style): { success, quotes: { 'USDCNY': 7.x, 'USDUSD': 1 } }
     Env: EXCHANGERATE_KEY (required)
     """
     access_key = (os.environ.get("EXCHANGERATE_KEY") or "").strip()
     if not access_key:
         raise RuntimeError("EXCHANGERATE_KEY is missing. Add it as a GitHub secret and expose in env.")
 
-    url = "https://api.exchangerate.host/latest"
-    # Ask only for USD and CNY to keep payload small
-    params = {"symbols": "USD,CNY", "access_key": access_key}
+    url = "https://api.exchangerate.host/live"
+    params = {"access_key": access_key, "currencies": "USD,CNY", "format": 1}
     data = http_get_json(url, params=params)
 
+    # First, honor 'success' flag when present
+    if isinstance(data, dict) and (data.get("success") is False):
+        # include short info if available (avoid leaking key)
+        info = (data.get("error") or {}).get("type") or data.get("error")
+        raise RuntimeError(f"exchangerate.host /live error: {info}")
+
+    # Try currencylayer-style 'quotes'
+    quotes = (data or {}).get("quotes") or {}
+    if "USDCNY" in quotes:
+        return float(quotes["USDCNY"])
+
+    # Fallback: some variants return 'rates' with explicit base currency amounts (per EUR or USD)
     rates = (data or {}).get("rates") or {}
-    usd = rates.get("USD")
-    cny = rates.get("CNY")
-    if not (usd and cny):
-        raise RuntimeError(f"exchangerate.host response missing USD/CNY: {json.dumps(data)[:300]}")
-    # rates are per EUR; USD->CNY = CNY_per_EUR / USD_per_EUR
-    return float(cny) / float(usd)
+    if rates:
+        usd = rates.get("USD")
+        cny = rates.get("CNY")
+        if usd and cny:
+            # If per-EUR, USD->CNY = CNY_per_EUR / USD_per_EUR; if per-USD, CNY_per_USD = CNY and USD=1
+            return float(cny) / float(usd) if float(usd) != 1.0 else float(cny)
+
+    # As a last resort, hit the convert endpoint (still requires key)
+    conv_url = "https://api.exchangerate.host/convert"
+    conv_params = {"access_key": access_key, "from": "USD", "to": "CNY", "amount": 1}
+    conv = http_get_json(conv_url, params=conv_params)
+    if isinstance(conv, dict):
+        # classic exchangerate.host returns 'result'; apilayer-style may return 'info'/'result'
+        if conv.get("result") is not None:
+            return float(conv["result"])
+        info = conv.get("info") or {}
+        if isinstance(info, dict) and "rate" in info:
+            return float(info["rate"])
+
+    raise RuntimeError(f"Unexpected exchangerate.host payload: {json.dumps(data)[:300]}")
 
 def fetch_usd_cny_rate() -> float:
-    # Single, strict source: exchangerate.host
-    return fetch_usd_cny_from_exchangerate_host()
+    # Single, strict source: exchangerate.host /live (with robust fallbacks)
+    return fetch_usd_cny_from_exchangerate_host_live()
 
 # -------- Step 4: Reference Gold (USD/oz) --------
 # Either TradingView Spot (preferred by setting REF_SOURCE=TV_SPOT),
-# or TradingView Futures (FUTURES). No Yahoo here, per request.
+# or TradingView Futures (FUTURES). No Yahoo anywhere.
 
 def _tv_scan_close(market: str, ticker: str) -> float:
     """
@@ -319,7 +343,7 @@ def main() -> None:
     # Step 1: SGE price (CNY/g)
     sge_cny_per_g = resolve_sge_price()
 
-    # Step 2: FX — exchangerate.host ONLY (USD->CNY), then invert to CNY->USD
+    # Step 2: FX — exchangerate.host /live ONLY (USD->CNY), then invert to CNY->USD
     usd_to_cny = fetch_usd_cny_rate()
     cny_to_usd = 1.0 / float(usd_to_cny)
 
