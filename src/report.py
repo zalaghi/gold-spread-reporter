@@ -32,7 +32,7 @@ def _request_with_retries(
     headers = kwargs.pop("headers", {}) or {}
     headers = {**DEFAULT_HEADERS, **headers}
     for attempt in range(max_retries):
-        resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
+        resp = requests.request(method, url, headers=headers, timeout=25, **kwargs)
         if resp.status_code < 400:
             if expected_json:
                 try:
@@ -43,11 +43,12 @@ def _request_with_retries(
 
         # Retry on throttling or server errors
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+            # honor Retry-After if present
             ra = resp.headers.get("Retry-After")
-            if ra and ra.isdigit():
+            if ra and str(ra).isdigit():
                 delay = float(ra)
             else:
-                delay = backoff_base * (2 ** attempt)
+                delay = backoff_base * (2 ** attempt)  # 0.6, 1.2, 2.4, ...
             time.sleep(delay)
             continue
 
@@ -66,11 +67,11 @@ def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optio
     if parse_mode:
         payload["parse_mode"] = parse_mode
         payload["disable_web_page_preview"] = True
-    r = requests.post(api, json=payload, headers=DEFAULT_HEADERS, timeout=20)
+    r = requests.post(api, json=payload, headers=DEFAULT_HEADERS, timeout=25)
     if not r.ok:
         raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")
 
-# -------- SGE (Step 1) --------
+# -------- Step 1: SGE (CNY/gram) --------
 
 def fetch_sge_au9999_from_xwteam(mode: str = "SP") -> float:
     """
@@ -151,64 +152,39 @@ def resolve_sge_price() -> float:
     else:
         return fetch_sge_au9999_from_xwteam(mode)
 
-# -------- FX (Step 2) — NO TradingView required --------
+# -------- Step 2: FX (USD->CNY) via exchangerate.host ONLY --------
 
 def fetch_usd_cny_from_exchangerate_host() -> float:
     """
-    Get USD->CNY using exchangerate.host (free, no key).
-    Returns the number of CNY per 1 USD.
+    Get USD->CNY using exchangerate.host with an access key.
+    We avoid using `base=USD` (may require paid tiers). Instead we request EUR base
+    and compute USD->CNY = (rate[CNY] / rate[USD]).
+    Env: EXCHANGERATE_KEY (required)
     """
+    access_key = (os.environ.get("EXCHANGERATE_KEY") or "").strip()
+    if not access_key:
+        raise RuntimeError("EXCHANGERATE_KEY is missing. Add it as a GitHub secret and expose in env.")
+
     url = "https://api.exchangerate.host/latest"
-    data = http_get_json(url, params={"base": "USD", "symbols": "CNY"})
-    rate = (data.get("rates") or {}).get("CNY")
-    if not rate:
-        raise RuntimeError(f"exchangerate.host missing CNY in {json.dumps(data)[:200]}")
-    return float(rate)
+    # Ask only for USD and CNY to keep payload small
+    params = {"symbols": "USD,CNY", "access_key": access_key}
+    data = http_get_json(url, params=params)
 
-def fetch_usd_cny_from_yahoo() -> float:
-    """
-    Get USD->CNY via Yahoo Finance quote.
-    """
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    data = http_get_json(url, params={"symbols": "USDCNY=X"})
-    result = (data.get("quoteResponse", {}).get("result") or [{}])[0]
-    rate = result.get("regularMarketPrice") or result.get("bid") or result.get("ask")
-    if rate is None:
-        raise RuntimeError(f"Yahoo USDCNY=X missing price in {json.dumps(result)[:200]}")
-    return float(rate)
+    rates = (data or {}).get("rates") or {}
+    usd = rates.get("USD")
+    cny = rates.get("CNY")
+    if not (usd and cny):
+        raise RuntimeError(f"exchangerate.host response missing USD/CNY: {json.dumps(data)[:300]}")
+    # rates are per EUR; USD->CNY = CNY_per_EUR / USD_per_EUR
+    return float(cny) / float(usd)
 
-def fetch_usd_cny_rate(source: str = None) -> float:
-    """
-    Choose FX source. Default to EXCHANGERATE_HOST (no TradingView).
-    """
-    s = (source or os.environ.get("FX_SOURCE") or "EXCHANGERATE_HOST").upper()
-    if s == "EXCHANGERATE_HOST":
-        try:
-            return fetch_usd_cny_from_exchangerate_host()
-        except Exception:
-            # fallback to Yahoo
-            return fetch_usd_cny_from_yahoo()
-    elif s == "YAHOO":
-        try:
-            return fetch_usd_cny_from_yahoo()
-        except Exception:
-            return fetch_usd_cny_from_exchangerate_host()
-    else:
-        # Any unknown value -> safe default
-        return fetch_usd_cny_from_exchangerate_host()
+def fetch_usd_cny_rate() -> float:
+    # Single, strict source: exchangerate.host
+    return fetch_usd_cny_from_exchangerate_host()
 
-# -------- Reference Gold (Step 4) — Futures or TV Spot --------
-
-def _fetch_yahoo_quote_with_retry(symbol: str) -> Optional[float]:
-    """Try Yahoo quote with retries. Return None on failure."""
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    try:
-        data = http_get_json(url, params={"symbols": symbol})
-        result = (data.get("quoteResponse", {}).get("result") or [{}])[0]
-        price = result.get("regularMarketPrice") or result.get("bid") or result.get("ask")
-        return float(price) if price is not None else None
-    except Exception:
-        return None
+# -------- Step 4: Reference Gold (USD/oz) --------
+# Either TradingView Spot (preferred by setting REF_SOURCE=TV_SPOT),
+# or TradingView Futures (FUTURES). No Yahoo here, per request.
 
 def _tv_scan_close(market: str, ticker: str) -> float:
     """
@@ -258,18 +234,15 @@ def _fetch_tradingview_spot_close(
             )
 
 def _fetch_tradingview_futures_close(ticker: str = "COMEX:GC1!") -> float:
-    """TradingView futures screener for front/continuous gold."""
+    """TradingView futures screener for front/continuous gold (no Yahoo)."""
     return _tv_scan_close("futures", ticker)
 
-def fetch_reference_gold_usd_per_oz(
-    yf_symbol: str = "GC=F",
-    ref_source: Optional[str] = None
-) -> float:
+def fetch_reference_gold_usd_per_oz(ref_source: Optional[str] = None) -> float:
     """
     Get the reference gold price (USD/oz) used in Step 4.
 
     Modes:
-      - FUTURES (default): Yahoo GC=F with fallback to TV futures (COMEX:GC1!)
+      - FUTURES (default): TradingView futures (COMEX:GC1! by default)
       - TV_SPOT: TradingView spot price via forex/cfd screener (OANDA:XAUUSD → fallback TVC:GOLD)
     """
     src = (ref_source or os.environ.get("REF_SOURCE") or "FUTURES").upper()
@@ -282,10 +255,7 @@ def fetch_reference_gold_usd_per_oz(
             alt_market=os.environ.get("TV_SPOT_MARKET_ALT") or "cfd",
         )
 
-    # FUTURES (existing behavior)
-    price = _fetch_yahoo_quote_with_retry(yf_symbol)
-    if price is not None:
-        return float(price)
+    # FUTURES (TradingView only)
     tv_ticker = os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!"
     return _fetch_tradingview_futures_close(tv_ticker)
 
@@ -340,8 +310,6 @@ def build_summary(
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    fx_source = (os.environ.get("FX_SOURCE") or "EXCHANGERATE_HOST").upper()
-    yf_symbol = (os.environ.get("YF_FUT_SYMBOL") or "GC=F").strip()
     parse_mode = (os.environ.get("TELEGRAM_PARSE_MODE") or "TEXT").upper()
     ref_source = (os.environ.get("REF_SOURCE") or "FUTURES").upper()
 
@@ -351,12 +319,12 @@ def main() -> None:
     # Step 1: SGE price (CNY/g)
     sge_cny_per_g = resolve_sge_price()
 
-    # Step 2: FX — fetch USD→CNY then invert to CNY→USD for display/math
-    usd_to_cny = fetch_usd_cny_rate(fx_source)
+    # Step 2: FX — exchangerate.host ONLY (USD->CNY), then invert to CNY->USD
+    usd_to_cny = fetch_usd_cny_rate()
     cny_to_usd = 1.0 / float(usd_to_cny)
 
-    # Step 4: Reference gold (USD/oz): Futures (default) or TV spot
-    ref_usd_per_oz = fetch_reference_gold_usd_per_oz(yf_symbol=yf_symbol, ref_source=ref_source)
+    # Step 4: Reference gold (USD/oz): TV futures (default) or TV spot
+    ref_usd_per_oz = fetch_reference_gold_usd_per_oz(ref_source=ref_source)
     ref_label = "Spot Gold (TradingView)" if ref_source == "TV_SPOT" else "CME Gold Futures"
 
     # Build and send
