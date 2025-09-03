@@ -32,19 +32,21 @@ jobs:
           # Choose which SGE field to use: SP | BP | MID (avg of SP & BP)
           SGE_PRICE_MODE: ${{ vars.SGE_PRICE_MODE }}
 
-          # FX source options: TRADINGVIEW (default), EXCHANGERATE_HOST, or YAHOO
+          # -------- FX (Step 2) --------
+          # Choose: EXCHANGERATE_HOST (default) or YAHOO
           FX_SOURCE: ${{ vars.FX_SOURCE }}
-          # Optional: override TradingView FX ticker (default: FX_IDC:USDCNY)
-          TV_FX_TICKER: ${{ vars.TV_FX_TICKER }}
 
-          # --- Reference gold (Step 4) ---
+          # -------- Reference gold (Step 4) --------
           # Choose reference source: FUTURES (default) or TV_SPOT
           REF_SOURCE: ${{ vars.REF_SOURCE }}
-          # When REF_SOURCE=TV_SPOT, set the TradingView spot ticker (default: OANDA:XAUUSD)
-          TV_SPOT_TICKER: ${{ vars.TV_SPOT_TICKER }}
+          # When REF_SOURCE=TV_SPOT, you may control market/ticker & fallback:
+          TV_SPOT_MARKET: ${{ vars.TV_SPOT_MARKET }}          # default: "forex"
+          TV_SPOT_TICKER: ${{ vars.TV_SPOT_TICKER }}          # default: "OANDA:XAUUSD"
+          TV_SPOT_MARKET_ALT: ${{ vars.TV_SPOT_MARKET_ALT }}  # default: "cfd"
+          TV_SPOT_TICKER_ALT: ${{ vars.TV_SPOT_TICKER_ALT }}  # default: "TVC:GOLD"
           # FUTURES options (kept for backward compatibility)
-          YF_FUT_SYMBOL: ${{ vars.YF_FUT_SYMBOL }}
-          TV_FUT_TICKER: ${{ vars.TV_FUT_TICKER }}
+          YF_FUT_SYMBOL: ${{ vars.YF_FUT_SYMBOL }}            # default: GC=F
+          TV_FUT_TICKER: ${{ vars.TV_FUT_TICKER }}            # default: COMEX:GC1!
 
           # Optional: specify parse mode for Telegram: 'HTML' or 'Markdown'
           TELEGRAM_PARSE_MODE: ${{ vars.TELEGRAM_PARSE_MODE }}
