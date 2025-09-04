@@ -26,11 +26,14 @@ def _request_with_retries(method: str, url: str, *, max_retries: int = 5, backof
         resp = requests.request(method, url, headers=headers, timeout=25, **kwargs)
         if resp.status_code < 400:
             if expected_json:
-                return resp.json()
+                try:
+                    return resp.json()
+                except Exception as e:
+                    raise RuntimeError(f"Non-JSON response from {url}: {resp.text[:200]}") from e
             return resp.text
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
             ra = resp.headers.get("Retry-After")
-            delay = float(ra) if ra and ra.isdigit() else backoff_base * (2 ** attempt)
+            delay = float(ra) if ra and str(ra).isdigit() else backoff_base * (2 ** attempt)
             time.sleep(delay)
             continue
         resp.raise_for_status()
@@ -70,15 +73,15 @@ def _match_instrument_row(row: Dict[str, Any], target: str) -> bool:
     tgt = _norm(target)
     if tgt == "AU9999":
         return "AU9999" in txt or "AU99.99" in txt
-    if tgt in {"AUTD"}:
+    if tgt == "AUTD":
         return "AUTD" in txt or "AUT+D" in txt
     return tgt in txt
 
 def _display_label(instr: str) -> str:
     u = (instr or "").upper()
-    if u in {"AUTD"}:
+    if u == "AUTD":
         return "Au+TD"
-    if u in {"AU9999"}:
+    if u == "AU9999":
         return "Au9999"
     return instr
 
@@ -91,7 +94,13 @@ def fetch_sge_from_xwteam(instrument: str = "AU9999", mode: str = "SP") -> float
     row = next((item for item in sh if _match_instrument_row(item, instrument)), None)
     if not row:
         raise RuntimeError(f"Instrument {instrument} not found in SH list")
-    bp, sp = float(row.get("BP") or "nan"), float(row.get("SP") or "nan")
+    def _to_float(x):
+        try:
+            return float(x)
+        except Exception:
+            return float('nan')
+    bp, sp = _to_float(row.get("BP")), _to_float(row.get("SP"))
+    mode = (mode or "SP").upper()
     if mode == "MID" and not math.isnan(bp) and not math.isnan(sp):
         return (bp + sp) / 2
     if mode == "BP" and not math.isnan(bp):
@@ -105,9 +114,10 @@ def resolve_sge_price_and_label() -> Tuple[float, str]:
     label = os.environ.get("SGE_INSTRUMENT_LABEL") or _display_label(instr)
     if src == "XWTEAM":
         return fetch_sge_from_xwteam(instr, mode), label
-    raise RuntimeError("Only XWTEAM supported here")
+    # You can add JISU support here if you use that source in the future.
+    return fetch_sge_from_xwteam(instr, mode), label
 
-# ---------- Step 2: FX ----------
+# ---------- Step 2: FX (exchangerate.host /live ONLY) ----------
 
 def fetch_usd_cny_from_exchangerate_host_live() -> float:
     key = os.environ.get("EXCHANGERATE_KEY", "").strip()
@@ -115,33 +125,66 @@ def fetch_usd_cny_from_exchangerate_host_live() -> float:
         raise RuntimeError("EXCHANGERATE_KEY missing")
     url = "https://api.exchangerate.host/live"
     data = http_get_json(url, params={"access_key": key, "currencies": "USD,CNY", "format": 1})
-    if data.get("success") is False:
+    if isinstance(data, dict) and data.get("success") is False:
         raise RuntimeError(f"FX API error: {data.get('error')}")
     if "quotes" in data and "USDCNY" in data["quotes"]:
         return float(data["quotes"]["USDCNY"])
-    raise RuntimeError(f"Unexpected FX payload: {data}")
+    # Fallback to /convert if format differs
+    conv = http_get_json("https://api.exchangerate.host/convert",
+                         params={"access_key": key, "from": "USD", "to": "CNY", "amount": 1})
+    if isinstance(conv, dict):
+        if conv.get("result") is not None:
+            return float(conv["result"])
+        info = conv.get("info") or {}
+        if isinstance(info, dict) and "rate" in info:
+            return float(info["rate"])
+    raise RuntimeError(f"Unexpected FX payload: {json.dumps(data)[:300]}")
 
 def fetch_usd_cny_rate() -> float:
     return fetch_usd_cny_from_exchangerate_host_live()
 
-# ---------- Step 4: Reference Gold ----------
+# ---------- Step 4: Reference Gold (TradingView) ----------
 
 def _tv_scan_close(market: str, ticker: str) -> float:
     url = f"https://scanner.tradingview.com/{market}/scan"
     columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
-    payload = {"symbols": {"tickers": [ticker]}, "columns": columns}
+    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
     data = http_post_json(url, payload)
     items = data.get("data") or []
     if not items:
-        raise RuntimeError(f"TradingView returned no data for {ticker}")
+        raise RuntimeError(f"TradingView {market} scan returned no data for {ticker}")
     values = items[0].get("d") or []
-    return float(values[0])
+    mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
+    close = mapping.get("close")
+    if close is None:
+        raise RuntimeError(f"TradingView {market} scan missing 'close' for {ticker}: {mapping}")
+    return float(close)
+
+def _fetch_tradingview_spot_close_with_fallback() -> float:
+    # Primary (often fine locally, flaky on CI)
+    primary_market = (os.environ.get("TV_SPOT_MARKET") or "forex").strip().lower()
+    primary_ticker = (os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD").strip()
+    # Fallback (very reliable on CI)
+    fallback_market = (os.environ.get("TV_SPOT_MARKET_ALT") or "cfd").strip().lower()
+    fallback_ticker = (os.environ.get("TV_SPOT_TICKER_ALT") or "TVC:GOLD").strip()
+    try:
+        return _tv_scan_close(primary_market, primary_ticker)
+    except Exception as e1:
+        try:
+            return _tv_scan_close(fallback_market, fallback_ticker)
+        except Exception as e2:
+            raise RuntimeError(
+                f"Failed TV spot. Primary {primary_market}:{primary_ticker} → {e1}. "
+                f"Fallback {fallback_market}:{fallback_ticker} → {e2}."
+            )
 
 def fetch_reference_gold_usd_per_oz(ref_source: Optional[str] = None) -> float:
     src = (ref_source or os.environ.get("REF_SOURCE") or "FUTURES").upper()
     if src == "TV_SPOT":
-        return _tv_scan_close("forex", os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD")
-    return _tv_scan_close("futures", os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!")
+        return _fetch_tradingview_spot_close_with_fallback()
+    # Futures via TradingView
+    tv_ticker = (os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!").strip()
+    return _tv_scan_close("futures", tv_ticker)
 
 # ---------- Summary ----------
 
