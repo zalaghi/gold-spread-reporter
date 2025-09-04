@@ -26,6 +26,8 @@ jobs:
       - name: Run Gold Spread Reporter
         env:
           # SGE
+          SGE_INSTRUMENT: AUTD
+          SGE_INSTRUMENT_LABEL: Au+TD   # optional, for display
           SGE_SOURCE: ${{ vars.SGE_SOURCE }}            # XWTEAM or JISU
           JISUAPI_KEY: ${{ secrets.JISUAPI_KEY }}       # if you ever use JISU
           SGE_PRICE_MODE: ${{ vars.SGE_PRICE_MODE }}    # SP | BP | MID
