@@ -3,13 +3,12 @@ import math
 import json
 import time
 import datetime as dt
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 import requests
 
 GRAMS_PER_TROY_OUNCE = 31.1034768
 
-# A simple browsery UA helps with some public endpoints
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -17,51 +16,32 @@ DEFAULT_HEADERS = {
     )
 }
 
-# -------- HTTP helpers with retries --------
+# ---------- HTTP helpers ----------
 
-def _request_with_retries(
-    method: str,
-    url: str,
-    *,
-    max_retries: int = 5,
-    backoff_base: float = 0.6,
-    expected_json: bool = True,
-    **kwargs
-):
-    """HTTP request with basic exponential backoff on 429/5xx."""
+def _request_with_retries(method: str, url: str, *, max_retries: int = 5, backoff_base: float = 0.6,
+                          expected_json: bool = True, **kwargs):
     headers = kwargs.pop("headers", {}) or {}
     headers = {**DEFAULT_HEADERS, **headers}
     for attempt in range(max_retries):
         resp = requests.request(method, url, headers=headers, timeout=25, **kwargs)
         if resp.status_code < 400:
             if expected_json:
-                try:
-                    return resp.json()
-                except Exception as e:
-                    raise RuntimeError(f"Non-JSON response from {url}: {resp.text[:200]}") from e
+                return resp.json()
             return resp.text
-
-        # Retry on throttling or server errors
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-            # honor Retry-After if present
             ra = resp.headers.get("Retry-After")
-            if ra and str(ra).isdigit():
-                delay = float(ra)
-            else:
-                delay = backoff_base * (2 ** attempt)  # 0.6, 1.2, 2.4, ...
+            delay = float(ra) if ra and ra.isdigit() else backoff_base * (2 ** attempt)
             time.sleep(delay)
             continue
-
-        # Unrecoverable (or out of retries)
         resp.raise_for_status()
 
-def http_get_json(url: str, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    return _request_with_retries("GET", url, params=params, headers=headers, expected_json=True)
+def http_get_json(url, params=None, headers=None):
+    return _request_with_retries("GET", url, params=params, headers=headers)
 
-def http_post_json(url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    return _request_with_retries("POST", url, json=payload, headers=headers, expected_json=True)
+def http_post_json(url, payload, headers=None):
+    return _request_with_retries("POST", url, json=payload, headers=headers)
 
-def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optional[str] = None) -> None:
+def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optional[str] = None):
     api = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
@@ -71,292 +51,135 @@ def send_telegram_message(token: str, chat_id: str, text: str, parse_mode: Optio
     if not r.ok:
         raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")
 
-# -------- Step 1: SGE (CNY/gram) --------
+# ---------- Helpers for instrument matching ----------
 
-def fetch_sge_au9999_from_xwteam(mode: str = "SP") -> float:
-    """
-    Fetch SGE Au9999 price (CNY/gram) from a free aggregator:
-    https://free.xwteam.cn/api/gold/trade
-    Uses data.SH where Symbol == 'SH_Au9999'.
-    mode: 'SP' (sell), 'BP' (buy), or 'MID' = (SP+BP)/2.
-    """
+def _norm(s: str) -> str:
+    if s is None:
+        return ""
+    t = s.upper()
+    t = t.replace("(T+D)", "TD").replace("T+D", "TD").replace("(TD)", "TD").replace("+", "")
+    for ch in [" ", "_", "-", ".", "/", "\\"]:
+        t = t.replace(ch, "")
+    return t
+
+def _row_text(row: Dict[str, Any]) -> str:
+    return _norm(" ".join(str(v) for v in (row or {}).values() if v is not None))
+
+def _match_instrument_row(row: Dict[str, Any], target: str) -> bool:
+    txt = _row_text(row)
+    tgt = _norm(target)
+    if tgt == "AU9999":
+        return "AU9999" in txt or "AU99.99" in txt
+    if tgt in {"AUTD"}:
+        return "AUTD" in txt or "AUT+D" in txt
+    return tgt in txt
+
+def _display_label(instr: str) -> str:
+    u = (instr or "").upper()
+    if u in {"AUTD"}:
+        return "Au+TD"
+    if u in {"AU9999"}:
+        return "Au9999"
+    return instr
+
+# ---------- Step 1: SGE ----------
+
+def fetch_sge_from_xwteam(instrument: str = "AU9999", mode: str = "SP") -> float:
     url = "https://free.xwteam.cn/api/gold/trade"
     data = http_get_json(url)
-    payload = (data or {}).get("data") or {}
-    sh = payload.get("SH") or []
-    row = None
-    for item in sh:
-        if (item.get("Symbol") or "").upper() == "SH_AU9999":
-            row = item
-            break
+    sh = (data.get("data") or {}).get("SH") or []
+    row = next((item for item in sh if _match_instrument_row(item, instrument)), None)
     if not row:
-        raise RuntimeError(f"Could not find SH_Au9999 in response: {str(data)[:300]}")
-
-    def _to_float(x):
-        try:
-            return float(x)
-        except Exception:
-            return float('nan')
-
-    bp = _to_float(row.get("BP"))
-    sp = _to_float(row.get("SP"))
-
-    mode = (mode or "SP").upper()
+        raise RuntimeError(f"Instrument {instrument} not found in SH list")
+    bp, sp = float(row.get("BP") or "nan"), float(row.get("SP") or "nan")
     if mode == "MID" and not math.isnan(bp) and not math.isnan(sp):
-        return (bp + sp) / 2.0
+        return (bp + sp) / 2
     if mode == "BP" and not math.isnan(bp):
         return bp
-    if not math.isnan(sp):
-        return sp
-    if not math.isnan(bp):
-        return bp
-    raise RuntimeError(f"Neither SP nor BP available in row: {row}")
+    return sp if not math.isnan(sp) else bp
 
-def fetch_sge_au9999_from_jisu(appkey: str) -> float:
-    """Optional fallback: JisuAPI Au9999 in CNY/gram (requires key)."""
-    if not appkey:
-        raise ValueError("JISUAPI_KEY is required for JISU source.")
-    url = "https://api.jisuapi.com/gold/shgold"
-    data = http_get_json(url, params={"appkey": appkey})
-    result = data.get("result") or data.get("data") or {}
-    items = result.get("list") or result.get("result") or result.get("items") or []
-    if not items:
-        items = data.get("list", [])
-    if not items:
-        raise RuntimeError(f"No SGE items found in response: {json.dumps(data)[:400]}")
-    preferred = None
-    for row in items:
-        t = (row.get("type") or row.get("code") or "").upper()
-        if t in {"AU9999", "AU99.99", "AU_9999", "AU_99_99"}:
-            preferred = row
-            break
-    if preferred is None:
-        for row in items:
-            name = (row.get("typename") or row.get("name") or "").lower()
-            if "au9999" in name or "au 99.99" in name or "99.99" in name:
-                preferred = row
-                break
-    if preferred is None:
-        preferred = items[0]
-    price_str = str(preferred.get("price") or preferred.get("new_price") or preferred.get("latest") or "")
-    return float(price_str)
-
-def resolve_sge_price() -> float:
+def resolve_sge_price_and_label() -> Tuple[float, str]:
     src = (os.environ.get("SGE_SOURCE") or "XWTEAM").upper()
     mode = (os.environ.get("SGE_PRICE_MODE") or "SP").upper()
+    instr = os.environ.get("SGE_INSTRUMENT") or "AU9999"
+    label = os.environ.get("SGE_INSTRUMENT_LABEL") or _display_label(instr)
     if src == "XWTEAM":
-        return fetch_sge_au9999_from_xwteam(mode)
-    elif src == "JISU":
-        key = os.environ.get("JISUAPI_KEY", "").strip()
-        return fetch_sge_au9999_from_jisu(key)
-    else:
-        return fetch_sge_au9999_from_xwteam(mode)
+        return fetch_sge_from_xwteam(instr, mode), label
+    raise RuntimeError("Only XWTEAM supported here")
 
-# -------- Step 2: FX (USD->CNY) via exchangerate.host /live (ONLY) --------
+# ---------- Step 2: FX ----------
 
 def fetch_usd_cny_from_exchangerate_host_live() -> float:
-    """
-    Get USD->CNY using exchangerate.host /live with an access key.
-    Response (apilayer-style): { success, quotes: { 'USDCNY': 7.x, 'USDUSD': 1 } }
-    Env: EXCHANGERATE_KEY (required)
-    """
-    access_key = (os.environ.get("EXCHANGERATE_KEY") or "").strip()
-    if not access_key:
-        raise RuntimeError("EXCHANGERATE_KEY is missing. Add it as a GitHub secret and expose in env.")
-
+    key = os.environ.get("EXCHANGERATE_KEY", "").strip()
+    if not key:
+        raise RuntimeError("EXCHANGERATE_KEY missing")
     url = "https://api.exchangerate.host/live"
-    params = {"access_key": access_key, "currencies": "USD,CNY", "format": 1}
-    data = http_get_json(url, params=params)
-
-    # First, honor 'success' flag when present
-    if isinstance(data, dict) and (data.get("success") is False):
-        # include short info if available (avoid leaking key)
-        info = (data.get("error") or {}).get("type") or data.get("error")
-        raise RuntimeError(f"exchangerate.host /live error: {info}")
-
-    # Try currencylayer-style 'quotes'
-    quotes = (data or {}).get("quotes") or {}
-    if "USDCNY" in quotes:
-        return float(quotes["USDCNY"])
-
-    # Fallback: some variants return 'rates' with explicit base currency amounts (per EUR or USD)
-    rates = (data or {}).get("rates") or {}
-    if rates:
-        usd = rates.get("USD")
-        cny = rates.get("CNY")
-        if usd and cny:
-            # If per-EUR, USD->CNY = CNY_per_EUR / USD_per_EUR; if per-USD, CNY_per_USD = CNY and USD=1
-            return float(cny) / float(usd) if float(usd) != 1.0 else float(cny)
-
-    # As a last resort, hit the convert endpoint (still requires key)
-    conv_url = "https://api.exchangerate.host/convert"
-    conv_params = {"access_key": access_key, "from": "USD", "to": "CNY", "amount": 1}
-    conv = http_get_json(conv_url, params=conv_params)
-    if isinstance(conv, dict):
-        # classic exchangerate.host returns 'result'; apilayer-style may return 'info'/'result'
-        if conv.get("result") is not None:
-            return float(conv["result"])
-        info = conv.get("info") or {}
-        if isinstance(info, dict) and "rate" in info:
-            return float(info["rate"])
-
-    raise RuntimeError(f"Unexpected exchangerate.host payload: {json.dumps(data)[:300]}")
+    data = http_get_json(url, params={"access_key": key, "currencies": "USD,CNY", "format": 1})
+    if data.get("success") is False:
+        raise RuntimeError(f"FX API error: {data.get('error')}")
+    if "quotes" in data and "USDCNY" in data["quotes"]:
+        return float(data["quotes"]["USDCNY"])
+    raise RuntimeError(f"Unexpected FX payload: {data}")
 
 def fetch_usd_cny_rate() -> float:
-    # Single, strict source: exchangerate.host /live (with robust fallbacks)
     return fetch_usd_cny_from_exchangerate_host_live()
 
-# -------- Step 4: Reference Gold (USD/oz) --------
-# Either TradingView Spot (preferred by setting REF_SOURCE=TV_SPOT),
-# or TradingView Futures (FUTURES). No Yahoo anywhere.
+# ---------- Step 4: Reference Gold ----------
 
 def _tv_scan_close(market: str, ticker: str) -> float:
-    """
-    Generic TradingView scan: market ∈ {forex, cfd, futures, indices, crypto, stocks...}
-    Returns 'close' or raises with context.
-    """
-    market = market.strip().lower()
     url = f"https://scanner.tradingview.com/{market}/scan"
     columns = ["close", "pricescale", "minmov", "fractional", "currency", "name"]
-    payload = {"symbols": {"tickers": [ticker], "query": {"types": []}}, "columns": columns}
+    payload = {"symbols": {"tickers": [ticker]}, "columns": columns}
     data = http_post_json(url, payload)
     items = data.get("data") or []
     if not items:
-        raise RuntimeError(f"TradingView {market} scan returned no data for {ticker}: {data}")
+        raise RuntimeError(f"TradingView returned no data for {ticker}")
     values = items[0].get("d") or []
-    mapping = {c: values[i] if i < len(values) else None for i, c in enumerate(columns)}
-    close = mapping.get("close")
-    if close is None:
-        raise RuntimeError(f"TradingView {market} scan: 'close' missing for {ticker}: {mapping}")
-    return float(close)
-
-def _fetch_tradingview_spot_close(
-    ticker: str = "OANDA:XAUUSD",
-    market: str = None,
-    alt_ticker: str = None,
-    alt_market: str = None
-) -> float:
-    """
-    Preferred: use user-specified market/ticker (defaults to forex/OANDA:XAUUSD).
-    If that returns no data, try alternate (defaults to cfd/TVC:GOLD).
-    """
-    primary_market = (market or os.environ.get("TV_SPOT_MARKET") or "forex").strip().lower()
-    primary_ticker = (ticker or os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD").strip()
-    fallback_market = (alt_market or os.environ.get("TV_SPOT_MARKET_ALT") or "cfd").strip().lower()
-    fallback_ticker = (alt_ticker or os.environ.get("TV_SPOT_TICKER_ALT") or "TVC:GOLD").strip()
-
-    try:
-        return _tv_scan_close(primary_market, primary_ticker)
-    except Exception as e_primary:
-        try:
-            return _tv_scan_close(fallback_market, fallback_ticker)
-        except Exception as e_fallback:
-            raise RuntimeError(
-                f"Failed to fetch spot via TradingView. "
-                f"Primary {primary_market}:{primary_ticker} → {e_primary}. "
-                f"Fallback {fallback_market}:{fallback_ticker} → {e_fallback}."
-            )
-
-def _fetch_tradingview_futures_close(ticker: str = "COMEX:GC1!") -> float:
-    """TradingView futures screener for front/continuous gold (no Yahoo)."""
-    return _tv_scan_close("futures", ticker)
+    return float(values[0])
 
 def fetch_reference_gold_usd_per_oz(ref_source: Optional[str] = None) -> float:
-    """
-    Get the reference gold price (USD/oz) used in Step 4.
-
-    Modes:
-      - FUTURES (default): TradingView futures (COMEX:GC1! by default)
-      - TV_SPOT: TradingView spot price via forex/cfd screener (OANDA:XAUUSD → fallback TVC:GOLD)
-    """
     src = (ref_source or os.environ.get("REF_SOURCE") or "FUTURES").upper()
-
     if src == "TV_SPOT":
-        return _fetch_tradingview_spot_close(
-            ticker=os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD",
-            market=os.environ.get("TV_SPOT_MARKET") or "forex",
-            alt_ticker=os.environ.get("TV_SPOT_TICKER_ALT") or "TVC:GOLD",
-            alt_market=os.environ.get("TV_SPOT_MARKET_ALT") or "cfd",
-        )
+        return _tv_scan_close("forex", os.environ.get("TV_SPOT_TICKER") or "OANDA:XAUUSD")
+    return _tv_scan_close("futures", os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!")
 
-    # FUTURES (TradingView only)
-    tv_ticker = os.environ.get("TV_FUT_TICKER") or "COMEX:GC1!"
-    return _fetch_tradingview_futures_close(tv_ticker)
+# ---------- Summary ----------
 
-# -------- Summary / Main --------
-
-def build_summary(
-    sge_cny_per_g: float,
-    cny_to_usd: float,
-    ref_usd_per_oz: float,
-    now_utc: Optional[dt.datetime] = None,
-    parse_mode: str = "TEXT",
-    ref_label: str = "CME Gold Futures",
-) -> str:
-    # Step 3: SGE converted to USD/oz
+def build_summary(sge_cny_per_g: float, sge_label: str, cny_to_usd: float,
+                  ref_usd_per_oz: float, ref_label: str, parse_mode: str = "TEXT") -> str:
     usd_per_oz_from_sge = (sge_cny_per_g * GRAMS_PER_TROY_OUNCE) * cny_to_usd
-
-    # Difference = (3 − 4)
     diff = usd_per_oz_from_sge - ref_usd_per_oz
-    if diff > 0:
-        diff_str = f"+{abs(diff):,.2f}"
-    elif diff < 0:
-        diff_str = f"-{abs(diff):,.2f}"
-    else:
-        diff_str = f"{diff:,.2f}"
+    diff_str = f"{diff:+,.2f}"
+    ts = dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f"Gold Spread (SGE vs {ref_label})\n"
+        f"Time: {ts}\n\n"
+        f"SGE ({sge_label}): {sge_cny_per_g:,.2f} CNY/g\n"
+        f"CNY→USD: {cny_to_usd:,.6f}\n"
+        f"SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz\n"
+        f"{ref_label}: {ref_usd_per_oz:,.2f} USD/oz\n"
+        f"Result: {diff_str} USD/oz"
+    )
 
-    now_utc = now_utc or dt.datetime.utcnow()
-    ts = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+# ---------- Main ----------
 
-    if parse_mode.upper() == "HTML":
-        return f"""
-<b>Gold Spread (SGE vs {ref_label})</b>
-<b>Time:</b> {ts}
-
-<b>SGE (Au9999):</b> {sge_cny_per_g:,.2f} CNY/g
-<b>CNY→USD:</b> {cny_to_usd:,.6f}
-<b>SGE → USD/oz:</b> {usd_per_oz_from_sge:,.2f} USD/oz
-<b>{ref_label}:</b> {ref_usd_per_oz:,.2f} USD/oz
-<b>Result:</b> {diff_str} USD/oz
-""".strip()
-    else:
-        return "\n".join([
-            f"Gold Spread (SGE vs {ref_label})",
-            f"Time: {ts}",
-            "",
-            f"SGE (Au9999): {sge_cny_per_g:,.2f} CNY/g",
-            f"CNY→USD: {cny_to_usd:,.6f}",
-            f"SGE → USD/oz: {usd_per_oz_from_sge:,.2f} USD/oz",
-            f"{ref_label}: {ref_usd_per_oz:,.2f} USD/oz",
-            f"Result: {diff_str} USD/oz",
-        ])
-
-def main() -> None:
+def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    parse_mode = (os.environ.get("TELEGRAM_PARSE_MODE") or "TEXT").upper()
     ref_source = (os.environ.get("REF_SOURCE") or "FUTURES").upper()
-
+    parse_mode = (os.environ.get("TELEGRAM_PARSE_MODE") or "TEXT").upper()
     if not token or not chat_id:
-        raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required.")
+        raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID required")
 
-    # Step 1: SGE price (CNY/g)
-    sge_cny_per_g = resolve_sge_price()
-
-    # Step 2: FX — exchangerate.host /live ONLY (USD->CNY), then invert to CNY->USD
+    sge_cny_per_g, sge_label = resolve_sge_price_and_label()
     usd_to_cny = fetch_usd_cny_rate()
-    cny_to_usd = 1.0 / float(usd_to_cny)
-
-    # Step 4: Reference gold (USD/oz): TV futures (default) or TV spot
-    ref_usd_per_oz = fetch_reference_gold_usd_per_oz(ref_source=ref_source)
+    cny_to_usd = 1 / usd_to_cny
+    ref_usd_per_oz = fetch_reference_gold_usd_per_oz(ref_source)
     ref_label = "Spot Gold (TradingView)" if ref_source == "TV_SPOT" else "CME Gold Futures"
 
-    # Build and send
-    msg = build_summary(sge_cny_per_g, cny_to_usd, ref_usd_per_oz, parse_mode=parse_mode, ref_label=ref_label)
-    send_telegram_message(
-        token, chat_id, msg,
-        parse_mode=(parse_mode if parse_mode in {"HTML", "MARKDOWN"} else None)
-    )
+    msg = build_summary(sge_cny_per_g, sge_label, cny_to_usd, ref_usd_per_oz, ref_label, parse_mode)
+    send_telegram_message(token, chat_id, msg,
+                          parse_mode=(parse_mode if parse_mode in {"HTML", "MARKDOWN"} else None))
 
 if __name__ == "__main__":
     main()
