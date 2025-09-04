@@ -1,122 +1,126 @@
 # گزارشگر اختلاف قیمت طلا (بورس شانگهای → اونس / آتی CME)
 
-این اکشن گیت‌هاب یک خلاصه‌ی تمیز به **تلگرام** ارسال می‌کند که شامل:
+این اکشن گیت‌هاب خلاصه‌ای از اختلاف قیمت طلا بین **بورس شانگهای** و **قیمت مرجع جهانی** را به **تلگرام** ارسال می‌کند:
 
-1) **بورس طلای شانگهای (Au9999)** به یوان/گرم  
-2) نرخ تبدیل **یوان→دلار (CNY→USD)**  
-3) قیمت معادل **اونس طلا بر حسب دلار** (محاسبه‌شده از مرحله ۱ و ۲)  
-4) قیمت **مرجع طلا** (فیوچرز یا اسپات تریدینگ‌ویو) بر حسب دلار/اونس  
+## مراحل محاسبه
 
-سپس **نتیجه = (مرحله ۳ − مرحله ۴)** را نشان می‌دهد:  
-- اگر ۳ > ۴ → با علامت `+`  
-- اگر ۳ < ۴ → با علامت `-`  
-- اگر برابر باشند → بدون علامت
+1) **قیمت بورس شانگهای (SGE)**  
+   - ابزار پیش‌فرض: `Au9999`  
+   - امکان انتخاب ابزار: `Au+TD` با استفاده از متغیر `SGE_INSTRUMENT=AUTD`  
+   - حالت قیمت (`SGE_PRICE_MODE`):  
+     - `SP` → قیمت فروش (Sell/Ask)  
+     - `BP` → قیمت خرید (Buy/Bid)  
+     - `MID` → میانگین SP و BP  
+
+2) **نرخ تبدیل ارز (CNY→USD)**  
+   - تنها منبع: **exchangerate.host** از طریق API Key  
+   - نیاز به متغیر `EXCHANGERATE_KEY` در Secrets  
+
+3) **تبدیل قیمت طلا از CNY/گرم به USD/اونس**  
+
+4) **قیمت مرجع جهانی (USD/oz)**  
+   - `FUTURES` → آتی‌های COMEX (نماد پیش‌فرض: `COMEX:GC1!`)  
+   - `TV_SPOT` → قیمت اسپات از TradingView (پیش‌فرض: `OANDA:XAUUSD`، جایگزین: `TVC:GOLD`)  
+
+5) **اختلاف قیمت (مرحله ۳ − مرحله ۴)**  
 
 ---
 
 ## متغیرها
 
-- `SGE_SOURCE` : منبع داده بورس طلا  
-  - `XWTEAM` (پیش‌فرض) → منبع رایگان بدون کلید  
-  - `JISU` → نیاز به کلید `JISUAPI_KEY` دارد  
+- `SGE_SOURCE`: منبع داده بورس طلا (پیش‌فرض: `XWTEAM`)  
+- `SGE_INSTRUMENT`: ابزار SGE (`AU9999` یا `AUTD`)  
+- `SGE_INSTRUMENT_LABEL`: برچسب نمایشی (پیش‌فرض: `Au9999` یا `Au+TD`)  
+- `SGE_PRICE_MODE`: حالت قیمت (SP | BP | MID)  
 
-- `SGE_PRICE_MODE` : انتخاب قیمت از SGE  
-  - `SP` → قیمت فروش (ask)  
-  - `BP` → قیمت خرید (bid)  
-  - `MID` → میانگین SP و BP  
+- `EXCHANGERATE_KEY`: کلید API برای نرخ ارز (exchangerate.host)  
 
-- `FX_SOURCE` : منبع نرخ ارز (پیش‌فرض: `EXCHANGERATE_HOST`)  
-  - `EXCHANGERATE_HOST`  
-  - `YAHOO`  
+- `REF_SOURCE`: منبع قیمت مرجع (`FUTURES` یا `TV_SPOT`)  
+- `TV_FUT_TICKER`: نماد آتی در TradingView (پیش‌فرض: `COMEX:GC1!`)  
+- `TV_SPOT_TICKER`: نماد اسپات (پیش‌فرض: `OANDA:XAUUSD`)  
+- `TV_SPOT_TICKER_ALT`: نماد اسپات جایگزین (پیش‌فرض: `TVC:GOLD`)  
 
-- `REF_SOURCE` : منبع قیمت مرجع طلا (مرحله ۴)  
-  - `FUTURES` (پیش‌فرض) → فیوچرز: یاهو `GC=F` و در صورت شکست تریدینگ‌ویو `COMEX:GC1!`  
-  - `TV_SPOT` → قیمت اسپات از تریدینگ‌ویو (پیش‌فرض: `OANDA:XAUUSD` و در صورت شکست `TVC:GOLD`)  
-
-- `YF_FUT_SYMBOL` : نماد فیوچرز در یاهو (`GC=F` پیش‌فرض)  
-- `TV_FUT_TICKER` : نماد فیوچرز در تریدینگ‌ویو (`COMEX:GC1!` پیش‌فرض)  
-- `TV_SPOT_MARKET` : مارکت تریدینگ‌ویو برای اسپات (پیش‌فرض: `forex`)  
-- `TV_SPOT_TICKER` : نماد اسپات تریدینگ‌ویو (پیش‌فرض: `OANDA:XAUUSD`)  
-- `TV_SPOT_MARKET_ALT` : مارکت جایگزین (پیش‌فرض: `cfd`)  
-- `TV_SPOT_TICKER_ALT` : نماد جایگزین (پیش‌فرض: `TVC:GOLD`)  
-
-- `TELEGRAM_PARSE_MODE` : حالت نمایش در تلگرام (`HTML` یا `Markdown`)  
+- `TELEGRAM_BOT_TOKEN`: توکن ربات تلگرام  
+- `TELEGRAM_CHAT_ID`: شناسه کانال یا چت تلگرام  
+- `TELEGRAM_PARSE_MODE`: حالت نمایش (HTML یا Markdown)  
 
 ---
 
 ## نمونه خروجی
 
+
 ```
 Gold Spread (SGE vs Spot Gold)
-Time: 2025-09-01 07:00 UTC
+Time: 2025-09-04 07:00 UTC
 
-SGE (Au9999): 794.36 CNY/g
+SGE (Au+TD): 792.60 CNY/g
 CNY→USD: 0.140200
-SGE → USD/oz: 3,464.88 USD/oz
+SGE → USD/oz: 3,465.20 USD/oz
 Spot Gold (TradingView): 3,475.70 USD/oz
-Result: -10.82 USD/oz
+Result: -10.50 USD/oz
 ```
 
 ---
 
 ## English Version
-
 # Gold Spread Reporter (SGE → USD/oz vs Reference Gold)
 
-This GitHub Action posts a clean **Telegram** summary comparing:
+This GitHub Action sends a **Telegram** summary comparing Shanghai Gold Exchange prices with global benchmarks.
 
-1) **SGE** (Shanghai Gold Exchange) Au9999 price (CNY/gram)  
-2) **CNY→USD** FX rate  
-3) **SGE → USD/oz** (conversion using Step 1 & 2)  
-4) **Reference gold price** (either CME/COMEX futures or TradingView spot, in USD/oz)  
+## Steps
 
-Then it prints **Result = (3 − 4)**:  
-- If 3 > 4 → prefix `+`  
-- If 3 < 4 → prefix `-`  
-- If equal → no sign
+1) **Shanghai Gold Exchange (SGE)**  
+   - Default instrument: `Au9999`  
+   - Optional: `Au+TD` via `SGE_INSTRUMENT=AUTD`  
+   - Price mode (`SGE_PRICE_MODE`):  
+     - `SP` → Sell (Ask)  
+     - `BP` → Buy (Bid)  
+     - `MID` → Average of SP and BP  
+
+2) **FX rate (CNY→USD)**  
+   - Source: **exchangerate.host** (requires API key)  
+   - Key must be provided as `EXCHANGERATE_KEY` in repo Secrets  
+
+3) **Convert SGE from CNY/gram → USD/oz**  
+
+4) **Reference price (USD/oz)**  
+   - `FUTURES` → COMEX gold futures (default: `COMEX:GC1!`)  
+   - `TV_SPOT` → TradingView spot gold (default: `OANDA:XAUUSD`, fallback: `TVC:GOLD`)  
+
+5) **Spread = Step 3 − Step 4**  
 
 ---
 
 ## Variables
 
-- `SGE_SOURCE` : data source for SGE  
-  - `XWTEAM` (default) → free source (no key)  
-  - `JISU` → requires `JISUAPI_KEY`  
+- `SGE_SOURCE`: SGE data source (default: `XWTEAM`)  
+- `SGE_INSTRUMENT`: instrument (`AU9999` or `AUTD`)  
+- `SGE_INSTRUMENT_LABEL`: display label (`Au9999` or `Au+TD`)  
+- `SGE_PRICE_MODE`: SP | BP | MID  
 
-- `SGE_PRICE_MODE` : which field to use  
-  - `SP` → Sell Price (ask)  
-  - `BP` → Buy Price (bid)  
-  - `MID` → Average of SP and BP  
+- `EXCHANGERATE_KEY`: API key for FX (exchangerate.host)  
 
-- `FX_SOURCE` : FX provider (default: `EXCHANGERATE_HOST`)  
-  - `EXCHANGERATE_HOST`  
-  - `YAHOO`  
+- `REF_SOURCE`: reference gold source (`FUTURES` or `TV_SPOT`)  
+- `TV_FUT_TICKER`: TradingView futures ticker (default: `COMEX:GC1!`)  
+- `TV_SPOT_TICKER`: spot ticker (default: `OANDA:XAUUSD`)  
+- `TV_SPOT_TICKER_ALT`: fallback ticker (default: `TVC:GOLD`)  
 
-- `REF_SOURCE` : reference gold price (Step 4)  
-  - `FUTURES` (default) → Yahoo `GC=F` futures, fallback TradingView `COMEX:GC1!`  
-  - `TV_SPOT` → TradingView spot price (default: `OANDA:XAUUSD`, fallback `TVC:GOLD`)  
-
-- `YF_FUT_SYMBOL` : Yahoo futures symbol (default: `GC=F`)  
-- `TV_FUT_TICKER` : TradingView futures ticker (default: `COMEX:GC1!`)  
-- `TV_SPOT_MARKET` : TradingView market for spot (default: `forex`)  
-- `TV_SPOT_TICKER` : TradingView spot ticker (default: `OANDA:XAUUSD`)  
-- `TV_SPOT_MARKET_ALT` : alternate market (default: `cfd`)  
-- `TV_SPOT_TICKER_ALT` : alternate spot ticker (default: `TVC:GOLD`)  
-
-- `TELEGRAM_PARSE_MODE` : Telegram formatting (`HTML` or `Markdown`)  
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token  
+- `TELEGRAM_CHAT_ID`: chat/channel ID  
+- `TELEGRAM_PARSE_MODE`: message format (HTML or Markdown)  
 
 ---
 
-## Example output
+## Example Output
 
 ```
 Gold Spread (SGE vs Spot Gold)
-Time: 2025-09-01 07:00 UTC
+Time: 2025-09-04 07:00 UTC
 
-SGE (Au9999): 794.36 CNY/g
+SGE (Au+TD): 792.60 CNY/g
 CNY→USD: 0.140200
-SGE → USD/oz: 3,464.88 USD/oz
+SGE → USD/oz: 3,465.20 USD/oz
 Spot Gold (TradingView): 3,475.70 USD/oz
-Result: -10.82 USD/oz
+Result: -10.50 USD/oz
 ```
 
